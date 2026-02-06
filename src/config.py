@@ -23,7 +23,7 @@ class Config:
     DEPLOYMENT_ENV: str = os.environ["DEPLOYMENT_ENV"]
     SERVER_PORT: Optional[int] = os.environ["SERVER_PORT"]
     SERVER_HOST: Optional[str or AnyHttpUrl] = os.environ["SERVER_HOST"]
-    TERMS_OF_SERVICE: str = os.environ["TERMS_OF_SERVICE"]
+    TERMS_OF_SERVICE: Optional[str] = os.environ.get("TERMS_OF_SERVICE", "")
 
     if DEPLOYMENT_ENV == "DEV":
         BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = [
@@ -34,6 +34,16 @@ class Config:
         ]
     else:
         BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
+
+    # JWT (used by user auth and deps)
+    JWT_ALGORITHM: str = os.environ.get("JWT_ALGORITHM", "HS256")
+    JWT_SECRET_KEY: str = os.environ.get("JWT_SECRET_KEY", "")
+    JWT_EXPIRATION_TIME: str = os.environ.get("JWT_EXPIRATION_TIME", "86400")
+
+    # UPI / Payment QR – your UPI ID so payments credit to your bank
+    # UPI_ID = your UPI ID (e.g. 9876543210@ybl, yourname@paytm, business@okaxis)
+    UPI_ID: str = os.environ.get("UPI_ID", "").strip()
+    UPI_MERCHANT_NAME: str = os.environ.get("UPI_MERCHANT_NAME", "Spice & Stories").strip() or "Restaurant"
 
     @staticmethod
     def assemble_db_connection():
@@ -51,33 +61,3 @@ class Config:
     # separate config division like made for user below this. if you have different integration
     # please also make sub division.
     ##############################################################################################
-
-    # =============================== User Domain Config =========================================
-    JWT_ALGORITHM: str = os.environ["JWT_ALGORITHM"]
-    JWT_SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
-    JWT_EXPIRATION_TIME: int = os.environ["JWT_EXPIRATION_TIME"]
-
-    # Google SSO
-    GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
-    GOOGLE_PROJECT_ID: str = os.environ["GOOGLE_PROJECT_ID"]
-    GOOGLE_AUTH_URI: str = os.environ["GOOGLE_AUTH_URI"]
-    GOOGLE_TOKEN_URI: str = os.environ["GOOGLE_TOKEN_URI"]
-    GOOGLE_AUTH_PROVIDER_X509_CERT_URL: str = os.environ[
-        "GOOGLE_AUTH_PROVIDER_X509_CERT_URL"
-    ]
-    GOOGLE_CLIENT_SECRET: str = os.environ["GOOGLE_CLIENT_SECRET"]
-    GOOGLE_AUTH_REDIRECT_URI: str = os.environ["GOOGLE_AUTH_REDIRECT_URI"]
-    if DEPLOYMENT_ENV == "DEV":
-        # to allow http traffic for local development
-        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
-    # Facebook SSO
-    FB_CLIENT_ID: str = os.environ["FB_CLIENT_ID"]
-    FB_CLIENT_SECRET: str = os.environ["FB_CLIENT_SECRET"]
-    FB_AUTH_REDIRECT_URI: str = os.environ["FB_AUTH_REDIRECT_URI"]
-
-    # Linkedin SSO
-    LINKEDIN_CLIENT_ID: str = os.environ["LINKEDIN_CLIENT_ID"]
-    LINKEDIN_CLIENT_SECRET: str = os.environ["LINKEDIN_CLIENT_SECRET"]
-    LINKEDIN_AUTH_REDIRECT_URI: str = os.environ["LINKEDIN_AUTH_REDIRECT_URI"]
-    # ================================== DIVISION END ============================================

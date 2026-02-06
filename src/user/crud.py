@@ -2,6 +2,7 @@ from typing import Any, Dict, Union
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from src.user.models import User
 from src.user.schemas import UserBase, UserUpdate
@@ -11,14 +12,16 @@ from utils.crud.base import CRUDBase
 # user crud
 class UserCRUD(CRUDBase[User, UserBase, UserUpdate]):
     def get_by_email(self, db: Session, email: str) -> User:
-        return db.query(User).filter(User.email == email).first()
+        if not email:
+            return None
+        return db.query(User).filter(func.lower(User.email) == email.strip().lower()).first()
 
     def create(self, db: Session, *, obj_in: UserBase) -> User:
-        obj_in_data: dict = jsonable_encoder(obj_in, exclude_unset=True)
+        obj_in_data: dict = obj_in.model_dump(exclude_unset=True) if hasattr(obj_in, "model_dump") else jsonable_encoder(obj_in, exclude_unset=True)
         password = obj_in_data.pop("password", None)
         db_obj = self.model(**obj_in_data)
-        if password:
-            db_obj.set_password(password)
+        if password is not None:
+            db_obj.set_password(str(password).strip())
         db.add(db_obj)
         db.commit()
         return db_obj

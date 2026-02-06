@@ -26,7 +26,7 @@ class UserFactory(factory.Factory):
 
     password = factory.LazyFunction(faker.password)
 
-    role = UserRoles.USER.value
+    role = UserRoles.STAFF.value
     email_verified = True
     phone_number_verified = True
 

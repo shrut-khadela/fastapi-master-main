@@ -49,6 +49,21 @@ def create_app():
 
     # Include API handler router
     from src.api_handler import api_router
+    from src.user.models import Invoice, Stock, Payment, QRCode
+    from utils.db.base import ModelBase
+    from utils.db.session import engine
+
+    @app.on_event("startup")
+    def _ensure_tables():
+        """Create stock, invoice, payment, and qr_code tables if they do not exist (e.g. when Alembic revision is out of sync)."""
+        try:
+            ModelBase.metadata.create_all(
+                engine,
+                tables=[Stock.__table__, Invoice.__table__, Payment.__table__, QRCode.__table__],
+                checkfirst=True,
+            )
+        except Exception as e:
+            logging.warning("Could not ensure tables exist: %s", e)
 
     # include main router
     app.include_router(api_router)

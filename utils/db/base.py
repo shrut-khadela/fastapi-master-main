@@ -7,7 +7,7 @@ from sqlalchemy.orm import as_declarative, declared_attr
 str_uuid = lambda: str(uuid.uuid4())
 
 
-@as_declarative()
+@as_declarative()   
 class ModelBase:
     __name__: str
 
@@ -20,8 +20,8 @@ class ModelBase:
     )
 
     # custom values
-    created_by = Column(String, nullable=False)
-    updated_by = Column(String, nullable=False)
+    created_by = Column(String, nullable=True)
+    updated_by = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
 
     # Generate __tablename__ automatically if inherited

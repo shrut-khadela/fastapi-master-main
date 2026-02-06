@@ -4,19 +4,18 @@ from fastapi import Depends
 from sqlalchemy import create_engine
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 
 from src.config import Config
 
-engine = create_engine(
-    Config.assemble_db_connection(),
-    pool_pre_ping=True,
-    pool_size=500,
-    max_overflow=100,
-    pool_recycle=60 * 60,
-    pool_timeout=30,
-)
+# Build database URL from config
+SQLALCHEMY_DB_URL = Config.assemble_db_connection()
+
+engine = create_engine(SQLALCHEMY_DB_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+Base = declarative_base()
 
 def _get_db() -> Generator:
     try:

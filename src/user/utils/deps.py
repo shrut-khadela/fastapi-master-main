@@ -1,92 +1,73 @@
-from typing import Annotated, Tuple
+from typing import Annotated
 
 import jwt
-from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.config import Config
 from src.user.crud import user_crud
-from src.user.models import AuthProvider, User
-from src.user.utils.sso import BaseSSO
-from src.user.utils.sso.fb_sso import FacebookSSO
-from src.user.utils.sso.google_sso import GoogleSSO
-from src.user.utils.sso.linkedin_sso import LinkedinSSO
-from utils.db.session import get_db
+from src.user.models import User
+from utils.db.session import _get_db
+from sqlalchemy.orm import Session
+
+security = HTTPBearer(auto_error=False)
 
 
-def _authenticated(authorization: str = Header(None, alias="Authorization")):
-    try:
-        jwt.decode(
-            authorization, Config.JWT_SECRET_KEY, algorithms=[Config.JWT_ALGORITHM]
+def authenticated_user(
+    db: Annotated[Session, Depends(_get_db)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+) -> User:
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-
-        return True
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired")
-
-    except jwt.InvalidTokenError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-
-
-def _authenticated_user(
-    db: get_db, authorization: str = Header(None, alias="Authorization")
-) -> Tuple[User, Session]:
+    token = credentials.credentials
     try:
-        user = None
-        if authorization:
-            payload = jwt.decode(
-                authorization.split()[1],
-                Config.JWT_SECRET_KEY,
-                algorithms=[Config.JWT_ALGORITHM],
-            )
-            user_id = payload["id"]
-            if not user_id:
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-
-            user = user_crud.get(db, id=user_id)
-            if not user:
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid User")
-        else:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authorization not found")
-
-        return user, db
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired")
-
+        payload = jwt.decode(
+            token,
+            key=Config.JWT_SECRET_KEY,
+            algorithms=[Config.JWT_ALGORITHM],
+        )
     except jwt.InvalidTokenError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-
-
-is_authorized = Annotated[bool, Depends(_authenticated)]
-authenticated_user = Annotated[Tuple[User, Session], Depends(_authenticated_user)]
-
-
-def _is_authorized_for(roles: list):
-    def _is_authorized(user_db: authenticated_user):
-        user, db = user_db
-        if user.role not in roles:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
-        return user, db
-
-    return _is_authorized
-
-
-is_authorized_for = lambda _roles: Annotated[
-    Tuple[User, Session], Depends(_is_authorized_for(_roles))
-]
-
-
-def get_auth_provider(provider: AuthProvider) -> BaseSSO:
-    if provider == AuthProvider.GOOGLE:
-        return GoogleSSO()
-    elif provider == AuthProvider.FACEBOOK:
-        return FacebookSSO()
-    elif provider == AuthProvider.LINKEDIN:
-        return LinkedinSSO()
-    else:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid provider")
-
-
-auth_provider = Annotated[BaseSSO, Depends(get_auth_provider)]
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = payload.get("id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # Coerce to string so lookup matches DB id (JWT may have id as int)
+    user_id = str(user_id)
+    user = user_crud.get(db, user_id)
+    if not user:
+        # Check if user exists but is soft-deleted
+        user_deleted = user_crud.get_deleted_also(db, user_id)
+        if user_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been deactivated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found. Log in again with valid credentials; the account may have been deleted or this token is from another environment.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if getattr(user, "is_banned", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is banned",
+        )
+    if not getattr(user, "is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is inactive",
+        )
+    return user
