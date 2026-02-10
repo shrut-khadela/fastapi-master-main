@@ -11,7 +11,7 @@ load_dotenv(os.getenv("ENV_FILE", ".env"))
 class Config:
     # Basic project configs
     BASE_DIR = str(Path(os.path.dirname(__file__)).parent)
-    PROJECT_NAME: str = "Boilerplate FastAPI Project"
+    PROJECT_NAME: str = "Spice & Stories"
     CONTACT_EMAIL: str = os.environ["CONTACT_EMAIL"]
     PROJECT_DESCRIPTION: str = f"""
         {PROJECT_NAME} API document.
@@ -42,8 +42,6 @@ class Config:
 
     # UPI / Payment QR – your UPI ID so payments credit to your bank
     # UPI_ID = your UPI ID (e.g. 9876543210@ybl, yourname@paytm, business@okaxis)
-    UPI_ID: str = os.environ.get("UPI_ID", "").strip()
-    UPI_MERCHANT_NAME: str = os.environ.get("UPI_MERCHANT_NAME", "Spice & Stories").strip() or "Restaurant"
 
     @staticmethod
     def assemble_db_connection():

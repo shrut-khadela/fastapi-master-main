@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from src.user.api import user_router, table_router, menu_router, category_router, order_router, order_status_router, stock_router, invoice_router, payment_status_router, payment_router
+from src.user.api import user_router, table_router, menu_router, category_router, order_router, order_status_router, stock_router, invoice_router, payment_status_router, payment_router, restaurant_router
 # Router
 api_router = APIRouter()
 api_router.include_router(user_router, include_in_schema=True, tags=["User APIs"])
@@ -13,3 +13,4 @@ api_router.include_router(stock_router, include_in_schema=True, tags=["Stock API
 api_router.include_router(invoice_router, include_in_schema=True, tags=["Invoice APIs"])
 api_router.include_router(payment_status_router, include_in_schema=True, tags=["Payment Status APIs"])
 api_router.include_router(payment_router, include_in_schema=True, tags=["Payment APIs"])
+api_router.include_router(restaurant_router, include_in_schema=True, tags=["Restaurant APIs"])

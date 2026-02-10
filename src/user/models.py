@@ -5,7 +5,16 @@ import logging
 
 import jwt
 from passlib.context import CryptContext
-from sqlalchemy import Column, Integer, String, ForeignKey, Float, Text, DateTime, Enum as SQLEnum
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    ForeignKey,
+    Float,
+    Text,
+    DateTime,
+    Enum as SQLEnum,
+)
 from sqlalchemy.sql.sqltypes import Boolean
 
 # Prefer Argon2 (matches existing DB $argon2id$ hashes); fallback to pbkdf2 if argon2 not installed
@@ -92,8 +101,17 @@ class User(ModelBase):
             algorithm=Config.JWT_ALGORITHM,
         )
 
+
+class Restaurant(ModelBase):
+    upi_merchant_name = Column(String, unique=True, index=True)
+    upi_id = Column(String, unique=True, index=True)
+    restaurant_address = Column(String, index=True)
+    restaurant_phone = Column(String, index=True)
+    restaurant_email = Column(String, index=True)
+
 class Table(ModelBase):
     table_no = Column(Integer, index=True)
+
 
 class Menu(ModelBase):
     menu_id = Column(String, index=True)
@@ -103,47 +121,59 @@ class Menu(ModelBase):
     category_name = Column(String, index=True)
     category_id = Column(String, index=True)
 
-class MenuItem(ModelBase):
-    item_name = Column(String, index=True)
-    item_price = Column(Integer, index=True)
-    # Link each menu item to a specific category
-    category_id = Column(String, ForeignKey("category.category_id"))
 
 class Category(ModelBase):
     category_id = Column(String, index=True)
     category_name = Column(String, index=True)
 
-class Order(ModelBase):
-    __tablename__ = "orders"
 
+class MenuItem(ModelBase):
+    item_name = Column(String, index=True)
+    item_price = Column(Integer, index=True)
+    # Link each menu item to a specific category
+    category_id = Column(String, ForeignKey("category.id"))
+
+
+class Order(ModelBase):
     item_list = Column(String, index=True)
     quantity = Column(Integer, index=True)
     order_pending = Column(String, default="false")
     order_done = Column(String, default="false")
     order_cancel = Column(String, default="false")
-    table_no = Column(Integer, index=True)  # references table.table_no; no FK (table_no not unique)
+    table_no = Column(
+        Integer, index=True
+    )  # references table.table_no; no FK (table_no not unique)
+
 
 class OrderStatus(ModelBase):
-    order_id = Column(String, ForeignKey("orders.id"))
+    order_id = Column(String, ForeignKey("order.id"))
     status = Column(String, index=True)
 
 
 class Invoice(ModelBase):
-    order_id = Column(String, ForeignKey("orders.id", ondelete="RESTRICT"), nullable=False)
+    order_id = Column(
+        String, ForeignKey("order.id", ondelete="RESTRICT"), nullable=False
+    )
     invoice_number = Column(String(50), unique=True, index=True, nullable=False)
     invoice_date = Column(DateTime, default=datetime.now, nullable=False)
     total_amount = Column(Float, nullable=False)
-    payment_status = Column(SQLEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False)
+    payment_status = Column(
+        SQLEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False
+    )
     notes = Column(Text, nullable=True)
+
 
 class Stock(ModelBase):
     name = Column(String, index=True)
     quantity = Column(Float, index=True)
     unit_of_measure = Column(String, index=True)
-    cost_price = Column(Float, index=True)
+    cost_per_unit = Column(Float, index=True)
+
 
 class Payment(ModelBase):
-    order_id = Column(String, ForeignKey("orders.id", ondelete="RESTRICT"), nullable=False)
+    order_id = Column(
+        String, ForeignKey("order.id", ondelete="RESTRICT"), nullable=False
+    )
     amount = Column(Float, nullable=False)
 
     status = Column(

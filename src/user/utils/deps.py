@@ -1,73 +1,74 @@
-from typing import Annotated
+from typing import Annotated, Tuple
 
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.orm import Session
 
 from src.config import Config
 from src.user.crud import user_crud
-from src.user.models import User
-from utils.db.session import _get_db
-from sqlalchemy.orm import Session
-
-security = HTTPBearer(auto_error=False)
+from src.user.models import AuthProvider, User
+from utils.db.session import get_db
 
 
-def authenticated_user(
-    db: Annotated[Session, Depends(_get_db)],
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
-) -> User:
-    if not credentials or not credentials.credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = credentials.credentials
+def _authenticated(authorization: str = Header(None, alias="Authorization")):
     try:
-        payload = jwt.decode(
-            token,
-            key=Config.JWT_SECRET_KEY,
-            algorithms=[Config.JWT_ALGORITHM],
+        jwt.decode(
+            authorization, Config.JWT_SECRET_KEY, algorithms=[Config.JWT_ALGORITHM]
         )
+
+        return True
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired")
+
     except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    user_id = payload.get("id")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    # Coerce to string so lookup matches DB id (JWT may have id as int)
-    user_id = str(user_id)
-    user = user_crud.get(db, user_id)
-    if not user:
-        # Check if user exists but is soft-deleted
-        user_deleted = user_crud.get_deleted_also(db, user_id)
-        if user_deleted:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account has been deactivated",
-                headers={"WWW-Authenticate": "Bearer"},
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+
+
+def _authenticated_user(
+    db: get_db, authorization: str = Header(None, alias="Authorization")
+) -> Tuple[User, Session]:
+    try:
+        user = None
+        if authorization:
+            payload = jwt.decode(
+                authorization.split()[1],
+                Config.JWT_SECRET_KEY,
+                algorithms=[Config.JWT_ALGORITHM],
             )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found. Log in again with valid credentials; the account may have been deleted or this token is from another environment.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if getattr(user, "is_banned", False):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is banned",
-        )
-    if not getattr(user, "is_active", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is inactive",
-        )
-    return user
+            user_id = payload["id"]
+            if not user_id:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+
+            user = user_crud.get(db, id=user_id)
+            if not user:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid User")
+        else:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authorization not found")
+
+        return user, db
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired")
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+
+
+is_authorized = Annotated[bool, Depends(_authenticated)]
+authenticated_user = Annotated[Tuple[User, Session], Depends(_authenticated_user)]
+
+
+def _is_authorized_for(roles: list):
+    def _is_authorized(user_db: authenticated_user):
+        user, db = user_db
+        if user.role not in roles:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
+        return user, db
+
+    return _is_authorized
+
+
+is_authorized_for = lambda _roles: Annotated[
+    Tuple[User, Session], Depends(_is_authorized_for(_roles))
+]
