@@ -21,6 +21,7 @@ class Restaurant(BaseModel):
     restaurant_address: Optional[str] = None
     restaurant_phone: Optional[str] = None
     restaurant_email: Optional[str] = None
+    logo_url: Optional[str] = None
 
 
 ########################################################
@@ -112,13 +113,29 @@ class MenuItemBase(BaseModel):
     # category_name: List[Category]
 
 
+# Request/API shape: frontend sends item_list with category_id/category_name, and category_name list
+class MenuItemIn(BaseModel):
+    item_name: str = ""
+    price: Optional[float] = 0
+    category_id: Optional[str] = ""
+    category_name: Optional[str] = ""
+
+
+class MenuCreate(BaseModel):
+    """Payload for creating a menu. Matches frontend and DB (item_list/category_name as lists)."""
+    item_list: List[MenuItemIn] = []
+    price: Optional[float] = 0
+    quantity: str = ""
+    category_name: List[dict] = []  # list of { category_id, category_name } from frontend
+
+
 class Menu(BaseModel):
+    """Response and update shape. item_list and category_name stored as JSON in DB."""
     menu_id: str = str(uuid.uuid4())
-    item_list: List[MenuItemBase]
-    price: Decimal
-    quantity: str  # e.g. "300" or "300ml"
-    category: Category
-    # category_name: List[Category]
+    item_list: List[dict] = []  # list of item dicts from DB
+    price: Optional[float] = 0
+    quantity: str = ""
+    category_name: List[dict] = []  # list of category dicts from DB
 
 
 ########################################################
@@ -243,8 +260,11 @@ class Invoice(BaseModel):
     invoice_number: str
     invoice_date: datetime
     total_amount: float
+    gst_percent: float = 0.0
+    discount_percent: float = 0.0
     payment_status: PaymentStatus
     notes: Optional[str] = None
+    customer_name: str = ""
 
 
 class InvoiceCreate(BaseModel):
@@ -255,9 +275,30 @@ class InvoiceCreate(BaseModel):
     order_id: str
     invoice_number: str
     invoice_date: datetime
-    total_amount: float
+    total_amount: Optional[float] = None  # auto-computed from order items + GST - discount if not provided
+    gst_percent: float = 0.0
+    discount_percent: float = 0.0
     payment_status: PaymentStatus = PaymentStatus.PENDING
     notes: Optional[str] = None
+    customer_name: str = ""
+
+    @field_validator("invoice_date", mode="before")
+    @classmethod
+    def coerce_invoice_date(cls, v):
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return datetime.now()
+            # Accept date-only "YYYY-MM-DD" from frontend
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                return datetime.strptime(s, "%Y-%m-%d")
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return v
 
     @field_validator("payment_status", mode="before")
     @classmethod
@@ -271,13 +312,47 @@ class InvoiceCreate(BaseModel):
         return v
 
 
+class InvoiceCreateForTable(BaseModel):
+    """Create a single merged invoice for all orders of a table."""
+    table_no: int
+    invoice_number: Optional[str] = None  # auto-generated if not provided
+    invoice_date: Optional[datetime] = None
+    gst_percent: float = 0.0
+    discount_percent: float = 0.0
+    payment_status: PaymentStatus = PaymentStatus.PENDING
+    notes: Optional[str] = None
+    customer_name: str = ""
+
+    @field_validator("invoice_date", mode="before")
+    @classmethod
+    def coerce_invoice_date(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                return datetime.strptime(s, "%Y-%m-%d")
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return v
+
+
 class InvoiceUpdate(BaseModel):
     order_id: Optional[str] = None
     invoice_number: Optional[str] = None
     invoice_date: Optional[datetime] = None
     total_amount: Optional[float] = None
+    gst_percent: Optional[float] = None
+    discount_percent: Optional[float] = None
     payment_status: Optional[PaymentStatus] = None
     notes: Optional[str] = None
+    customer_name: str = ""
 
 
 class InvoiceResponse(BaseModel):
@@ -286,8 +361,11 @@ class InvoiceResponse(BaseModel):
     invoice_number: str
     invoice_date: datetime
     total_amount: float
+    gst_percent: float = 0.0
+    discount_percent: float = 0.0
     payment_status: PaymentStatus
     notes: Optional[str] = None
+    customer_name: str = ""
 
 
 class PaymentStatusUpdate(BaseModel):
@@ -304,8 +382,9 @@ class PaymentStatusResponse(BaseModel):
 ########################################################
 class PaymentCreate(BaseModel):
     restaurant_name: str
-    order_id: str
-    amount: float
+    invoice_id: Optional[str] = None  # if set, order_id and amount are taken from this invoice
+    order_id: Optional[str] = None
+    amount: Optional[float] = None
     payment_status: PaymentStatus = PaymentStatus.PENDING
     upi_ref_id: Optional[str] = None
     retry_count: int = 0

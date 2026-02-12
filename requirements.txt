@@ -1,6 +1,15 @@
 # ============================================================================
-# Restaurant Management System - Requirements
+# Restaurant Management System - Requirements (Backend + Frontend)
 # ============================================================================
+#
+# BACKEND (Python): Install with:  pip install -r requirements.txt
+# FRONTEND (Node):  Install with:  cd frontend && npm install
+#
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# BACKEND - Python Dependencies
+# ----------------------------------------------------------------------------
 
 # Web Framework & Server
 fastapi==0.104.0

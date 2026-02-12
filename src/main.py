@@ -1,9 +1,11 @@
 import logging
+import os
 import traceback
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.config import Config
 
@@ -65,8 +67,13 @@ def create_app():
         except Exception as e:
             logging.warning("Could not ensure tables exist: %s", e)
 
-    # include main router
-    app.include_router(api_router)
+    # include main router (prefix so frontend can use same base for API and view/print pages)
+    app.include_router(api_router, prefix="/api")
+
+    # serve uploaded restaurant logos
+    uploads_dir = os.path.join(Config.BASE_DIR, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    app.mount("/api/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
     # controller routes
     @app.get("/", tags=["API Base"])

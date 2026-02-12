@@ -1,13 +1,16 @@
+import html
 import json
 import logging
+import os
 import uuid
 from typing import List
 
 import io
 
 import qrcode
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, Response
+from src.config import Config
 from sqlalchemy.orm import Session
 
 from src.user.crud import user_crud
@@ -35,6 +38,7 @@ from src.user.schemas import (
     UserResponse,
     UserUpdate,
     Menu,
+    MenuCreate,
     OrderCreate,
     OrderResponse,
     OrderStatus,
@@ -45,6 +49,7 @@ from src.user.schemas import (
     Stock,
     StockUpdate,
     InvoiceCreate,
+    InvoiceCreateForTable,
     Invoice,
     InvoiceUpdate,
     InvoiceResponse,
@@ -118,6 +123,54 @@ def create_restaurant(restaurant_data: Restaurant, db: get_db):
     return restaurant_data
 
 
+@restaurant_router.get("/get_restaurants", response_model=List[Restaurant])
+def get_restaurants(db: get_db, page: int = 1, per_page: int = 50):
+    rows = restaurant_crud.get_multi(db, page=page, per_page=per_page)
+    return [
+        Restaurant(
+            upi_merchant_name=r.upi_merchant_name or "",
+            upi_id=r.upi_id or "",
+            restaurant_address=getattr(r, "restaurant_address", None),
+            restaurant_phone=getattr(r, "restaurant_phone", None),
+            restaurant_email=getattr(r, "restaurant_email", None),
+            logo_url=getattr(r, "logo_url", None),
+        )
+        for r in rows
+    ]
+
+
+ALLOWED_LOGO_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+EXT_FROM_CONTENT_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+@restaurant_router.post("/upload_restaurant_logo")
+def upload_restaurant_logo(file: UploadFile = File(...)):
+    """Upload a logo image; returns logo_url to use in create_restaurant."""
+    if file.content_type not in ALLOWED_LOGO_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Allowed types: PNG, JPEG, WebP, GIF",
+        )
+    ext = EXT_FROM_CONTENT_TYPE.get(file.content_type) or ".png"
+    uploads_dir = os.path.join(Config.BASE_DIR, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    filename = f"restaurant_logo_{uuid.uuid4().hex}{ext}"
+    filepath = os.path.join(uploads_dir, filename)
+    try:
+        contents = file.file.read()
+        with open(filepath, "wb") as f:
+            f.write(contents)
+    finally:
+        file.file.close()
+    logo_url = f"/api/uploads/{filename}"
+    return {"logo_url": logo_url}
+
+
 ########################################################
 # User APIs
 ########################################################
@@ -135,12 +188,14 @@ def signup(user_req: SignupRequest, db: get_db):
     data = user_req.model_dump()
     data["email"] = email
     data["password"] = (data.get("password") or "").strip()
+    # Signup has no authenticated user; use new user's firstname for audit fields
+    firstname_str = (data.get("firstname") or "signup").strip() or "signup"
     user = user_crud.create(
         db,
         obj_in=UserBase(
             id=user_id,
-            created_by=UserModel.firstname,
-            updated_by=UserModel.firstname,
+            created_by=firstname_str,
+            updated_by=firstname_str,
             **data,
         ),
     )
@@ -170,7 +225,8 @@ def login(login_creds: LoginRequest, db: get_db):
 
 @user_router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
 def me(user_db: authenticated_user):
-    return user_db
+    user, _ = user_db
+    return user
 
 
 @user_router.get(
@@ -212,12 +268,13 @@ def delete_user(user_db: authenticated_user):
     "/create_table", response_model=Table, status_code=status.HTTP_201_CREATED
 )
 def create_table(table_data: Table, user_db: authenticated_user):
-    _, db = user_db
-    obj_in = table_data.model_dump()
-    obj_in["created_by"] = str(UserModel.firstname)
-    obj_in["updated_by"] = str(UserModel.firstname)
-    table_crud.create(db, obj_in=obj_in)
-    return Table(table_id=str(table_data.table_id), table_no=table_data.table_no)
+    user, db = user_db
+    # Table model has table_no (+ ModelBase); no table_id column (id is the PK)
+    obj_in = {"table_no": table_data.table_no}
+    obj_in["created_by"] = str(getattr(user, "firstname", None) or "system")
+    obj_in["updated_by"] = str(getattr(user, "firstname", None) or "system")
+    created = table_crud.create(db, obj_in=obj_in)
+    return Table(table_id=str(created.id), table_no=created.table_no)
 
 
 @table_router.get("/get_tables", response_model=List[Table])
@@ -344,13 +401,27 @@ def _menu_row_to_schema(m):
 @menu_router.post(
     "/create_menu", response_model=Menu, status_code=status.HTTP_201_CREATED
 )
-def create_menu(menu_data: Menu, user_db: authenticated_user):
+def create_menu(menu_data: MenuCreate, user_db: authenticated_user):
     _, db = user_db
-    obj_in = menu_data.model_dump()
-    obj_in["created_by"] = str(UserModel.firstname)
-    obj_in["updated_by"] = str(UserModel.firstname)
-    created = menu_crud.create(db, obj_in=obj_in)
-    return _menu_row_to_schema(created)
+    # Serialize lists to JSON strings for DB columns
+    item_list_json = json.dumps(
+        [p.model_dump() if hasattr(p, "model_dump") else p for p in menu_data.item_list],
+        default=str,
+    )
+    category_name_json = json.dumps(menu_data.category_name, default=str)
+    db_obj = MenuModel(
+        menu_id=str(uuid.uuid4()),
+        item_list=item_list_json,
+        price=int(menu_data.price or 0),
+        quantity=str(menu_data.quantity or ""),
+        category_name=category_name_json,
+        created_by=str(UserModel.firstname),
+        updated_by=str(UserModel.firstname),
+    )
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return _menu_row_to_schema(db_obj)
 
 
 @menu_router.get("/get_menus", response_model=List[Menu])
@@ -554,6 +625,13 @@ def delete_order(order_id: str, db: get_db):
 ########################################################
 
 
+def _normalize_order_id(order_id: str) -> str:
+    """Strip surrounding quotes so IDs like \"uuid\" still resolve."""
+    if not order_id:
+        return order_id
+    return order_id.strip().strip('"').strip("'").strip()
+
+
 @order_status_router.put(
     "/update_order_status/{order_id}", response_model=OrderStatusResponse
 )
@@ -563,6 +641,13 @@ def update_order_status(
     user_db: authenticated_user,
 ):
     _, db = user_db
+    order_id = _normalize_order_id(order_id)
+    # Ensure order exists
+    order = order_crud.get(db, id=order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
+        )
     order_status = (
         db.query(OrderStatusModel)
         .filter(
@@ -572,13 +657,21 @@ def update_order_status(
         .first()
     )
     if not order_status:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Order status not found"
+        # Create order_status row on first update (orders don't get one at creation)
+        order_status = OrderStatusModel(
+            order_id=order_id,
+            status=order_status_data.status.value,
+            created_by=str(UserModel.firstname),
+            updated_by=str(UserModel.firstname),
         )
-    order_status.status = order_status_data.status.value
-    order_status.updated_by = str(UserModel.firstname)
-    order_status_crud.update(db, db_obj=order_status, obj_in=order_status_data)
-    db.refresh(order_status)
+        db.add(order_status)
+        db.commit()
+        db.refresh(order_status)
+    else:
+        order_status.status = order_status_data.status.value
+        order_status.updated_by = str(UserModel.firstname)
+        order_status_crud.update(db, db_obj=order_status, obj_in=order_status_data)
+        db.refresh(order_status)
     return OrderStatusResponse(
         order_id=str(order_status.order_id), status=order_status.status or ""
     )
@@ -675,6 +768,13 @@ def delete_stock(stock_id: str, user_db: authenticated_user):
 ########################################################
 
 
+def _invoice_total_from_subtotal(subtotal: float, gst_percent: float, discount_percent: float) -> float:
+    """Compute total from subtotal + GST% - discount% (discount applied on subtotal)."""
+    gst_amount = round(subtotal * (gst_percent / 100), 2)
+    discount_amount = round(subtotal * (discount_percent / 100), 2)
+    return round(subtotal + gst_amount - discount_amount, 2)
+
+
 @invoice_router.post(
     "/create_invoice", response_model=Invoice, status_code=status.HTTP_201_CREATED
 )
@@ -686,7 +786,15 @@ def create_invoice(invoice_data: InvoiceCreate, user_db: authenticated_user):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order not found. Use a valid order_id from GET /get_orders.",
         )
-    obj_in = invoice_data.model_dump()
+    items = _parse_order_items(order.item_list or "[]")
+    subtotal = round(sum((item["quantity"] * item["price"]) for item in items), 2)
+    gst_percent = float(getattr(invoice_data, "gst_percent", 0) or 0)
+    discount_percent = float(getattr(invoice_data, "discount_percent", 0) or 0)
+    total_amount = _invoice_total_from_subtotal(subtotal, gst_percent, discount_percent)
+    obj_in = invoice_data.model_dump(exclude_unset=True)
+    obj_in["total_amount"] = total_amount
+    obj_in["gst_percent"] = gst_percent
+    obj_in["discount_percent"] = discount_percent
     obj_in["created_by"] = str(UserModel.firstname)
     obj_in["updated_by"] = str(UserModel.firstname)
     try:
@@ -705,8 +813,11 @@ def create_invoice(invoice_data: InvoiceCreate, user_db: authenticated_user):
         invoice_number=created.invoice_number,
         invoice_date=created.invoice_date,
         total_amount=created.total_amount,
+        gst_percent=getattr(created, "gst_percent", 0) or 0,
+        discount_percent=getattr(created, "discount_percent", 0) or 0,
         payment_status=created.payment_status,
         notes=created.notes,
+        customer_name=getattr(created, "customer_name", ""),
     )
 
 
@@ -720,8 +831,11 @@ def get_invoices(db: get_db, page: int = 1, per_page: int = 10):
             invoice_number=i.invoice_number,
             invoice_date=i.invoice_date,
             total_amount=i.total_amount,
+            gst_percent=getattr(i, "gst_percent", 0) or 0,
+            discount_percent=getattr(i, "discount_percent", 0) or 0,
             payment_status=i.payment_status,
             notes=i.notes,
+            customer_name=getattr(i, "customer_name", ""),
         )
         for i in invoices
     ]
@@ -740,8 +854,11 @@ def get_invoice(invoice_id: str, db: get_db):
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         total_amount=invoice.total_amount,
+        gst_percent=getattr(invoice, "gst_percent", 0) or 0,
+        discount_percent=getattr(invoice, "discount_percent", 0) or 0,
         payment_status=invoice.payment_status,
         notes=invoice.notes,
+        customer_name=getattr(invoice, "customer_name", ""),
     )
 
 
@@ -771,10 +888,16 @@ def update_invoice(
         invoice.invoice_date = invoice_data.invoice_date
     if invoice_data.total_amount is not None:
         invoice.total_amount = invoice_data.total_amount
+    if invoice_data.gst_percent is not None:
+        invoice.gst_percent = invoice_data.gst_percent
+    if invoice_data.discount_percent is not None:
+        invoice.discount_percent = invoice_data.discount_percent
     if invoice_data.payment_status is not None:
         invoice.payment_status = invoice_data.payment_status
     if invoice_data.notes is not None:
         invoice.notes = invoice_data.notes
+    if invoice_data.customer_name is not None:
+        invoice.customer_name = invoice_data.customer_name
     invoice.updated_by = str(user_db.firstname)
     invoice_crud.update(db, db_obj=invoice, obj_in=invoice_data)
     db.refresh(invoice)
@@ -784,8 +907,146 @@ def update_invoice(
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         total_amount=invoice.total_amount,
+        gst_percent=getattr(invoice, "gst_percent", 0) or 0,
+        discount_percent=getattr(invoice, "discount_percent", 0) or 0,
         payment_status=invoice.payment_status,
         notes=invoice.notes,
+        customer_name=getattr(invoice, "customer_name", ""),
+    )
+
+
+@invoice_router.get(
+    "/tables_with_uninvoiced_orders", response_model=List[int]
+)
+def get_tables_with_uninvoiced_orders(db: get_db):
+    """Return list of table numbers that have at least one uninvoiced order (for dropdown when creating invoice by table)."""
+    all_invoices = (
+        db.query(InvoiceModel)
+        .filter(InvoiceModel.is_deleted == false())
+        .all()
+    )
+    invoiced_order_ids = set()
+    for inv in all_invoices:
+        invoiced_order_ids.add(inv.order_id)
+        if inv.order_ids:
+            try:
+                ids = json.loads(inv.order_ids)
+                if isinstance(ids, list):
+                    invoiced_order_ids.update(str(x) for x in ids)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    filters = [OrderModel.is_deleted == false()]
+    if invoiced_order_ids:
+        filters.append(~OrderModel.id.in_(invoiced_order_ids))
+    rows = (
+        db.query(OrderModel.table_no)
+        .filter(*filters)
+        .distinct()
+        .order_by(OrderModel.table_no)
+        .all()
+    )
+    return [r[0] for r in rows if r[0] is not None]
+
+
+@invoice_router.post(
+    "/create_invoice_for_table", response_model=Invoice, status_code=status.HTTP_201_CREATED
+)
+def create_invoice_for_table(
+    payload: InvoiceCreateForTable, user_db: authenticated_user
+):
+    """Create a single merged invoice for all (uninvoiced) orders from the given table."""
+    _, db = user_db
+    table_no = payload.table_no
+
+    # Collect all order IDs that are already on any invoice
+    all_invoices = (
+        db.query(InvoiceModel)
+        .filter(InvoiceModel.is_deleted == false())
+        .all()
+    )
+    invoiced_order_ids = set()
+    for inv in all_invoices:
+        invoiced_order_ids.add(inv.order_id)
+        if inv.order_ids:
+            try:
+                ids = json.loads(inv.order_ids)
+                if isinstance(ids, list):
+                    invoiced_order_ids.update(str(x) for x in ids)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # All orders for this table that are not yet invoiced
+    filters = [
+        OrderModel.table_no == table_no,
+        OrderModel.is_deleted == false(),
+    ]
+    if invoiced_order_ids:
+        filters.append(~OrderModel.id.in_(invoiced_order_ids))
+    table_orders = (
+        db.query(OrderModel).filter(*filters).order_by(OrderModel.id).all()
+    )
+    if not table_orders:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No uninvoiced orders found for table {table_no}. All orders for this table may already be invoiced.",
+        )
+
+    order_ids_list = [str(o.id) for o in table_orders]
+    first_order_id = order_ids_list[0]
+
+    # Compute subtotal from all orders' item_list, then apply GST and discount
+    subtotal = 0.0
+    for o in table_orders:
+        items = _parse_order_items(o.item_list or "[]")
+        subtotal += sum((item["quantity"] * item["price"]) for item in items)
+    subtotal = round(subtotal, 2)
+    gst_percent = float(getattr(payload, "gst_percent", 0) or 0)
+    discount_percent = float(getattr(payload, "discount_percent", 0) or 0)
+    total_amount = _invoice_total_from_subtotal(subtotal, gst_percent, discount_percent)
+
+    invoice_number = payload.invoice_number or f"INV-{int(__import__('time').time() * 1000)}"
+    invoice_date = payload.invoice_date
+    if invoice_date is None:
+        from datetime import datetime
+        invoice_date = datetime.now()
+
+    obj_in = {
+        "order_id": first_order_id,
+        "order_ids": json.dumps(order_ids_list),
+        "invoice_number": invoice_number,
+        "invoice_date": invoice_date,
+        "total_amount": total_amount,
+        "gst_percent": gst_percent,
+        "discount_percent": discount_percent,
+        "payment_status": payload.payment_status.value
+        if hasattr(payload.payment_status, "value")
+        else payload.payment_status,
+        "notes": payload.notes,
+        "customer_name": (payload.customer_name or "").strip(),
+        "created_by": str(UserModel.firstname),
+        "updated_by": str(UserModel.firstname),
+    }
+    try:
+        created = invoice_crud.create(db, obj_in=obj_in)
+    except IntegrityError as e:
+        err_msg = str(e.orig) if getattr(e, "orig", None) else str(e)
+        if "invoice_number" in err_msg or "ix_invoice_invoice_number" in err_msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An invoice with this invoice_number already exists. Use a different invoice_number.",
+            ) from e
+        raise
+    return Invoice(
+        invoice_id=str(created.id),
+        order_id=created.order_id,
+        invoice_number=created.invoice_number,
+        invoice_date=created.invoice_date,
+        total_amount=created.total_amount,
+        gst_percent=getattr(created, "gst_percent", 0) or 0,
+        discount_percent=getattr(created, "discount_percent", 0) or 0,
+        payment_status=created.payment_status,
+        notes=created.notes,
+        customer_name=getattr(created, "customer_name", ""),
     )
 
 
@@ -804,6 +1065,233 @@ def delete_invoice(invoice_id: str, db: get_db):
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found"
     )
+
+
+def _parse_order_items(item_list_str: str) -> List[dict]:
+    """Parse order item_list JSON into list of {description, quantity, price} for invoice."""
+    if not item_list_str or not (item_list_str or "").strip():
+        return []
+    try:
+        raw = json.loads(item_list_str) if isinstance(item_list_str, str) else item_list_str
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for i, el in enumerate(raw):
+        if not isinstance(el, dict):
+            continue
+        name = el.get("name") or el.get("item_name") or el.get("description") or f"Item {i + 1}"
+        qty = int(el.get("qty") or el.get("quantity") or 1)
+        price = float(el.get("price") or 0)
+        rows.append({"description": str(name), "quantity": qty, "price": price})
+    return rows
+
+
+@invoice_router.get(
+    "/invoice/{invoice_id}/view",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def invoice_view_page(invoice_id: str, db: get_db):
+    """Generate a printable invoice page with restaurant details and line items."""
+    invoice = invoice_crud.get(db, id=invoice_id)
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found"
+        )
+
+    # Merged invoice: multiple orders from same table
+    order_ids_json = getattr(invoice, "order_ids", None)
+    order_ids_list = []
+    if order_ids_json:
+        try:
+            parsed = json.loads(order_ids_json)
+            if isinstance(parsed, list) and len(parsed) > 1:
+                order_ids_list = [str(x) for x in parsed]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if order_ids_list:
+        orders = []
+        for oid in order_ids_list:
+            o = order_crud.get(db, id=oid)
+            if o:
+                orders.append(o)
+        if not orders:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Orders not found for this invoice",
+            )
+        order = orders[0]
+        line_items = []
+        for o in orders:
+            line_items.extend(_parse_order_items(o.item_list or "[]"))
+    else:
+        order = order_crud.get(db, id=invoice.order_id)
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found for this invoice",
+            )
+        line_items = _parse_order_items(order.item_list or "[]")
+
+    restaurants = restaurant_crud.get_multi(db, page=1, per_page=1)
+    restaurant = restaurants[0] if restaurants else None
+
+    logo_url = getattr(restaurant, "logo_url", None) or ""
+    address = getattr(restaurant, "restaurant_address", None) or ""
+    phone = getattr(restaurant, "restaurant_phone", None) or ""
+    email = getattr(restaurant, "restaurant_email", None) or ""
+
+    inv_date = invoice.invoice_date
+    if hasattr(inv_date, "strftime"):
+        date_str = inv_date.strftime("%d/%m/%Y")
+    else:
+        date_str = str(inv_date)[:10] if inv_date else ""
+
+    total = float(invoice.total_amount or 0)
+    subtotal = round(sum((item["quantity"] * item["price"]) for item in line_items), 2) or total
+    gst_percent = float(getattr(invoice, "gst_percent", 0) or 0)
+    discount_percent = float(getattr(invoice, "discount_percent", 0) or 0)
+    gst_amount = round(subtotal * (gst_percent / 100), 2)
+    discount_amount = round(subtotal * (discount_percent / 100), 2)
+    total_computed = round(subtotal + gst_amount - discount_amount, 2)
+    if abs(total_computed - total) > 0.01:
+        total_computed = total
+
+    rows_html = "".join(
+        f"""
+        <tr>
+          <td>{i + 1}</td>
+          <td>{html.escape(str(item['description']))}</td>
+          <td>{item['quantity']}pcs</td>
+          <td>₹{item['price']:.2f}</td>
+        </tr>"""
+        for i, item in enumerate(line_items)
+    )
+    if not rows_html:
+        rows_html = "<tr><td colspan='4'>No items</td></tr>"
+
+    # Header: logo (if set) or initial, then restaurant name (auto from first restaurant in DB)
+    restaurant_display_name = (restaurant.upi_merchant_name or "Restaurant") if restaurant else "Restaurant"
+    logo_html = ""
+    if logo_url:
+        logo_html = f'<img src="{html.escape(logo_url)}" alt="{html.escape(restaurant_display_name)}" class="logo-img" />'
+    else:
+        initial = (restaurant_display_name or "R")[0].upper()
+        logo_html = f'<div class="logo-placeholder" aria-hidden="true">{html.escape(initial)}</div>'
+
+    website = getattr(restaurant, "website", None) or ""
+    contact_lines = []
+    if phone:
+        contact_lines.append(f'<span class="contact-line"><span class="icon">&#9742;</span> {html.escape(phone)}</span>')
+    if website:
+        contact_lines.append(f'<span class="contact-line"><span class="icon">&#127760;</span> {html.escape(website)}</span>')
+    elif address:
+        contact_lines.append(f'<span class="contact-line"><span class="icon">&#127760;</span> www.restaurant.com</span>')
+    if email:
+        contact_lines.append(f'<span class="contact-line"><span class="icon">&#9993;</span> {html.escape(email)}</span>')
+    if address:
+        contact_lines.append(f'<span class="contact-line"><span class="icon">&#128205;</span> {html.escape(address)}</span>')
+    contact_html = "".join(contact_lines) if contact_lines else "<span class=\"contact-line\">—</span>"
+
+    customer_name_val = (getattr(invoice, "customer_name", "") or "").strip()
+    customer_display = html.escape(customer_name_val) if customer_name_val else f"Table {html.escape(str(order.table_no or ''))}"
+    customer_address = ""
+
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Invoice {html.escape(invoice.invoice_number or "")}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@500&display=swap" rel="stylesheet">
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 2rem; background: #f5f0e8; color: #3d2f24; }}
+    .invoice {{ max-width: 800px; margin: 0 auto; background: #fdfbf7; padding: 2.5rem; border-radius: 8px; box-shadow: 0 2px 16px rgba(61,47,36,0.06); position: relative; }}
+    .leaf-top {{ position: absolute; top: 1rem; left: 1rem; color: #6b5344; font-size: 1.8rem; opacity: 0.7; }}
+    .leaf-bottom {{ position: absolute; bottom: 1rem; right: 1rem; color: #6b5344; font-size: 1.8rem; opacity: 0.7; }}
+    .header-top {{ display: flex; justify-content: center; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }}
+    .logo-img {{ width: 56px; height: 56px; object-fit: contain; border-radius: 50%; }}
+    .logo-placeholder {{ width: 56px; height: 56px; border: 2px solid #6b5344; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; color: #6b5344; }}
+    .logo-text {{ font-weight: 700; font-size: 1.25rem; color: #3d2f24; letter-spacing: 0.02em; }}
+    .header-row {{ display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.5rem; }}
+    .bill-to {{ font-size: 0.75rem; color: #6b5344; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.2rem; }}
+    .customer-name {{ font-size: 1.1rem; font-weight: 700; color: #3d2f24; }}
+    .customer-addr {{ font-size: 0.9rem; color: #5c4a3a; }}
+    .inv-meta {{ text-align: right; font-size: 0.9rem; color: #3d2f24; }}
+    .inv-meta p {{ margin: 0.2rem 0; }}
+    h1.invoice-title {{ text-align: center; font-size: 1.6rem; margin: 1.25rem 0; color: #3d2f24; font-weight: 700; letter-spacing: 0.02em; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; }}
+    th {{ text-align: left; padding: 0.5rem 0.4rem; border-bottom: 1px solid #d4cdc4; font-size: 0.8rem; color: #3d2f24; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
+    td {{ padding: 0.5rem 0.4rem; border-bottom: 1px solid #e8e2d9; font-size: 0.9rem; color: #3d2f24; }}
+    .summary-wrap {{ margin-top: 1.5rem; display: flex; justify-content: flex-end; }}
+    .summary {{ width: 280px; border-collapse: collapse; font-size: 0.9rem; color: #3d2f24; }}
+    .summary tr {{ border-bottom: 1px solid #e8e2d9; }}
+    .summary td {{ padding: 0.35rem 0; border: none; }}
+    .summary td:first-child {{ padding-right: 1.5rem; }}
+    .summary td:last-child {{ text-align: right; }}
+    .summary .total-row {{ font-weight: 700; font-size: 1rem; border-bottom: none; padding-top: 0.4rem; }}
+    .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid #e8e2d9; }}
+    .thanks {{ font-family: 'Dancing Script', cursive; font-size: 1.15rem; color: #6b5344; margin-bottom: 0.75rem; }}
+    .contact {{ font-size: 0.85rem; color: #5c4a3a; }}
+    .contact-line {{ display: block; margin: 0.2rem 0; }}
+    .icon {{ margin-right: 0.35rem; color: #6b5344; }}
+    @media print {{ body {{ background: #fff; }} .invoice {{ box-shadow: none; }} }}
+  </style>
+</head>
+<body>
+  <div class="invoice">
+    <span class="leaf-top">&#10047;</span>
+    <div class="header-top">
+      {logo_html}
+      <span class="logo-text">{html.escape(restaurant_display_name)}</span>
+    </div>
+    <div class="header-row">
+      <div>
+        <div class="bill-to">INVOICE TO:</div>
+        <div class="customer-name">{html.escape(customer_display)}</div>
+        <div class="customer-addr">{html.escape(customer_address) or "—"}</div>
+      </div>
+      <div class="inv-meta">
+        <p><strong>INVOICE NO:</strong> {html.escape(invoice.invoice_number or "")}</p>
+        <p><strong>DATE:</strong> {date_str}</p>
+      </div>
+    </div>
+    <h1 class="invoice-title">INVOICE</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>SL NO</th>
+          <th>ITEM DESCRIPTION</th>
+          <th>QUANTITY</th>
+          <th>PRICE</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows_html}
+      </tbody>
+    </table>
+    <table class="summary">
+      <tr><td>SUB TOTAL</td><td>₹{subtotal:.2f}</td></tr>
+      <tr><td>GST ({gst_percent}%)</td><td>₹{gst_amount:.2f}</td></tr>
+      <tr><td>DISCOUNT ({discount_percent}%)</td><td>-₹{discount_amount:.2f}</td></tr>
+      <tr class="total-row"><td>TOTAL</td><td>₹{total_computed:.2f}</td></tr>
+    </table>
+    <div class="footer">
+      <div class="thanks">Thank you for your recent order!</div>
+      <div class="contact">
+        {contact_html}
+      </div>
+    </div>
+    <span class="leaf-bottom">&#10047;</span>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(html_content)
 
 
 ########################################################
@@ -859,9 +1347,9 @@ def generate_qr_png(data: str, size: int = 10, border: int = 2) -> bytes:
 
 
 def _qr_image_url(request: Request, payment_id: str) -> str:
-    """Build full URL for the QR image endpoint."""
+    """Build full URL for the QR image endpoint (must include /api prefix as app mounts api_router at /api)."""
     base = str(request.base_url).rstrip("/")
-    return f"{base}/{payment_id}/qr/image"
+    return f"{base}/api/{payment_id}/qr/image"
 
 
 @payment_router.get(
@@ -918,26 +1406,59 @@ def pay_page(request: Request, payment_id: str, db: get_db):
     status_code=status.HTTP_201_CREATED,
 )
 def create_payment(request: Request, payload: PaymentCreate, db: get_db):
-    # Validate order exists
-    order = order_crud.get(db, id=payload.order_id)
+    order_id = payload.order_id
+    amount = payload.amount
+
+    if payload.invoice_id:
+        invoice = invoice_crud.get(db, id=payload.invoice_id)
+        if not invoice:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice not found. Use a valid invoice_id from GET /get_invoices.",
+            )
+        order_id = invoice.order_id
+        amount = float(invoice.total_amount or 0)
+    else:
+        if not order_id or amount is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide either invoice_id or both order_id and amount.",
+            )
+        amount = float(amount)
+
+    order = order_crud.get(db, id=order_id)
     if not order:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Order not found. Use a valid order_id from GET /get_orders.",
+            detail="Order not found for this invoice/order.",
         )
     # Check duplicate payment for this order
     existing = (
-        db.query(PaymentModel).filter(PaymentModel.order_id == payload.order_id).first()
+        db.query(PaymentModel).filter(PaymentModel.order_id == order_id).first()
     )
     if existing:
+        # Return existing payment with QR so frontend can show it without a second request
+        existing_response = PaymentResponse(
+            payment_id=str(existing.id),
+            order_id=existing.order_id,
+            amount=existing.amount,
+            payment_status=existing.status,
+            retry_count=existing.retry_count or 0,
+            upi_ref_id=existing.upi_ref_id,
+            qr_image_url=_qr_image_url(request, str(existing.id)),
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A payment already exists for this order.",
+            detail={
+                "message": "A payment already exists for this order.",
+                "payment_id": str(existing.id),
+                "payment": existing_response.model_dump(),
+            },
         )
 
     payment = PaymentModel(
-        order_id=payload.order_id,
-        amount=payload.amount,
+        order_id=order_id,
+        amount=amount,
         status=PaymentStatus.PENDING,
         retry_count=payload.retry_count or 0,
         upi_ref_id=payload.upi_ref_id,

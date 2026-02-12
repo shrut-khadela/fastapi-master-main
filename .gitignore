@@ -161,3 +161,6 @@ test_env_var.env
 lin-env
 QNA.txt
 inte.text
+
+# Uploaded restaurant logos
+uploads/

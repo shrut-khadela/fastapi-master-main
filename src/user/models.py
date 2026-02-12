@@ -108,6 +108,7 @@ class Restaurant(ModelBase):
     restaurant_address = Column(String, index=True)
     restaurant_phone = Column(String, index=True)
     restaurant_email = Column(String, index=True)
+    logo_url = Column(String, nullable=True)
 
 class Table(ModelBase):
     table_no = Column(Integer, index=True)
@@ -154,13 +155,17 @@ class Invoice(ModelBase):
     order_id = Column(
         String, ForeignKey("order.id", ondelete="RESTRICT"), nullable=False
     )
+    order_ids = Column(Text, nullable=True)  # JSON array of order IDs when merging multiple orders for same table
     invoice_number = Column(String(50), unique=True, index=True, nullable=False)
     invoice_date = Column(DateTime, default=datetime.now, nullable=False)
     total_amount = Column(Float, nullable=False)
+    gst_percent = Column(Float, default=0.0, nullable=False)
+    discount_percent = Column(Float, default=0.0, nullable=False)
     payment_status = Column(
         SQLEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False
     )
     notes = Column(Text, nullable=True)
+    customer_name = Column(String(255), nullable=False)  # optional; shown in "INVOICE TO:" instead of table when set
 
 
 class Stock(ModelBase):
